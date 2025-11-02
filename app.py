@@ -109,13 +109,10 @@ def train_sophisticated_model(retrain=False):
     patients_df = pd.DataFrame(patient_data)
     def should_refer(row):
         p = 0.3
-        if row['severity'] == 'low' and row['vitals_score'] > 6 and row['condition'] in ['flu', 'fracture', 'other']:
-            p += 0.45
-        if row['severity'] == 'high' or row['vitals_score'] <= 3 or row['condition'] == 'cardiac':
-            p -= 0.25
+        if row['severity'] == 'low' and row['vitals_score'] > 6 and row['condition'] in ['flu', 'fracture', 'other']: p += 0.45
+        if row['severity'] == 'high' or row['vitals_score'] <= 3 or row['condition'] == 'cardiac': p -= 0.25
         p += 0.02 * row['comorbidities']
-        if row['hospital_load'] > 70:
-            p += 0.25 * ((row['hospital_load'] - 70) / 30)
+        if row['hospital_load'] > 70: p += 0.25 * ((row['hospital_load'] - 70) / 30)
         p = np.clip(p, 0.02, 0.98)
         return np.random.choice([0, 1], p=[1 - p, p])
 
@@ -141,8 +138,20 @@ def train_sophisticated_model(retrain=False):
     }
     grid = GridSearchCV(pipeline, param_grid, cv=3, n_jobs=-1, scoring='roc_auc', verbose=0)
     grid.fit(X_train, y_train)
-    calibrated = CalibratedClassifierCV(grid.best_estimator_, cv=3, method='isotonic')
+
+    # --- THIS IS THE CRITICAL CHANGE ---
+    # Get the best pipeline that GridSearchCV found. It is already fitted.
+    best_pipeline = grid.best_estimator_
+
+    # Get the feature names from this fitted pipeline BEFORE calibration.
+    cat_names = best_pipeline.named_steps['preprocessor'].named_transformers_['cat'].named_steps['onehot'].get_feature_names_out(categorical_features)
+    # --- END OF CRITICAL CHANGE ---
+
+    # Now, create and fit the calibrated classifier using the best pipeline
+    calibrated = CalibratedClassifierCV(best_pipeline, cv=3, method='isotonic')
     calibrated.fit(X_train, y_train)
+
+    # Evaluate using the calibrated model
     y_proba = calibrated.predict_proba(X_test)[:, 1]
     y_pred = (y_proba >= 0.5).astype(int)
     accuracy = accuracy_score(y_test, y_pred)
@@ -150,14 +159,18 @@ def train_sophisticated_model(retrain=False):
     brier = brier_score_loss(y_test, y_proba)
     class_report_df = pd.DataFrame(classification_report(y_test, y_pred, output_dict=True)).transpose()
     cm = confusion_matrix(y_test, y_pred)
+
+    # Calculate permutation importance on the FINAL calibrated model
     perm_res = permutation_importance(calibrated, X_test, y_test, n_repeats=12, random_state=42, n_jobs=-1)
-    cat_names = calibrated.base_estimator_.named_steps['preprocessor'].named_transformers_['cat'].named_steps['onehot'].get_feature_names_out(categorical_features)
+    
+    # Construct the final list of feature names (we already got cat_names earlier)
     feat_names = numeric_features + list(cat_names)
     importances_df = pd.DataFrame({
         'feature': feat_names,
         'importance_mean': perm_res.importances_mean,
         'importance_std': perm_res.importances_std
     }).sort_values('importance_mean', ascending=False)
+
     model_artifact = {
         'pipeline': calibrated, 'feature_cols': feature_cols, 'X_test': X_test,
         'y_test': y_test, 'accuracy': accuracy, 'auc': auc, 'brier': brier,
