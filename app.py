@@ -250,7 +250,7 @@ with col1:
         p_condition = st.selectbox("Condition", options=['flu', 'fracture', 'cardiac', 'respiratory', 'other'])
         p_hosp_load = st.slider("Hospital load (%)", 0, 100, 60)
         p_lat = st.number_input("Patient latitude", 40.02, 40.12, 40.05, format="%.5f")
-        p_lon = st.number_input("Patient longitude", -73.98, -74.12, -74.02, format="%.5f")
+        p_lon = st.number_input("Patient longitude", -74.12, -73.98, -74.02, format="%.5f")
         if st.form_submit_button("Assess and Route"):
             input_df = pd.DataFrame([{'age': p_age, 'vitals_score': p_vitals, 'comorbidities': p_comorbid,
                                       'hospital_load': p_hosp_load, 'patient_lat': p_lat, 'patient_lon': p_lon,
