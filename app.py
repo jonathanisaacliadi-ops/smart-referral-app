@@ -7,6 +7,7 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
+from st_gsheets_connection import GSheetsConnection
 
 # ... (all sklearn imports remain the same) ...
 from sklearn.model_selection import train_test_split, GridSearchCV
@@ -47,20 +48,16 @@ def haversine_km(lat1, lon1, lat2, lon2):
     a = math.sin(dphi/2)**2 + math.cos(phi1)*math.cos(phi2)*math.sin(dlambda/2)**2
     return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
-## CHANGED: This function now updates the Google Sheet directly
 def persist_clinics(df):
     """Updates the 'Clinics' worksheet in Google Sheets with the provided DataFrame."""
-    conn = st.connection("gcs", type="gsheets")
+    # Use the same direct class connection method here to bypass the bug
+    conn = st.experimental_connection("gcs", type=GSheetsConnection)
     conn.update(worksheet="Clinics", data=df)
     st.toast("Clinic loads updated in the cloud.")
 
-## DELETED: The default data now lives permanently in the Google Sheet, not in the code.
-# def load_clinics_default(): ...
-
-## CHANGED: This function now reads from the Google Sheet
 def load_clinics():
     """Loads clinic data from the 'Clinics' worksheet in Google Sheets."""
-    conn = st.connection("gcs", type="gsheets")
+    conn = st.experimental_connection("gcs", type=GSheetsConnection)
     df = conn.read(worksheet="Clinics", usecols=list(range(7)), ttl="10m") # Cache for 10 mins
     # Ensure data types are correct
     df = df.dropna(subset=['clinic_id'])
