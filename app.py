@@ -7,6 +7,8 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
+import gspread # CHANGED: Import the core gspread library
+from gspread_dataframe import set_with_dataframe # CHANGED: Import a helper for writing data
 
 # ... (all sklearn imports remain the same) ...
 from sklearn.model_selection import train_test_split, GridSearchCV
@@ -29,12 +31,6 @@ st.set_page_config(
     layout="wide"
 )
 
-# --- DELETED: No longer need local file paths for clinics ---
-# WORK_DIR = os.path.dirname(__file__)
-# CLINICS_PATH = os.path.join(WORK_DIR, "clinics.json")
-# MODEL_PATH = os.path.join(WORK_DIR, "trained_pipeline.joblib")
-
-## CHANGED: Model path is simpler
 MODEL_PATH = "trained_pipeline.joblib"
 
 
@@ -47,38 +43,49 @@ def haversine_km(lat1, lon1, lat2, lon2):
     a = math.sin(dphi/2)**2 + math.cos(phi1)*math.cos(phi2)*math.sin(dlambda/2)**2
     return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
-def persist_clinics(df):
-    """Updates the 'Clinics' worksheet in Google Sheets with the provided DataFrame."""
-    conn = st.connection("gcs", type="gsheets") # Back to the original
-    conn.update(worksheet="Clinics", data=df)
-    st.toast("Clinic loads updated in the cloud.")
+## ----------------------------------------------------------------------------------
+## CHANGED: New, more robust functions to connect directly using gspread
+## This completely bypasses the broken st.connection feature.
+## ----------------------------------------------------------------------------------
 
+# Use caching to prevent re-authenticating on every page interaction
+@st.cache_resource
+def connect_to_gsheet():
+    """Connects to Google Sheets using credentials from st.secrets and returns the worksheet."""
+    creds = st.secrets["connections"]["gcs"]["service_account_info"]
+    gc = gspread.service_account_from_dict(creds)
+    # IMPORTANT: Your spreadsheet file must be named "clinic-referral-app-data"
+    spreadsheet = gc.open("clinic-referral-app-data")
+    # IMPORTANT: The tab at the bottom must be named "Clinics"
+    worksheet = spreadsheet.worksheet("Clinics")
+    return worksheet
+
+# Use caching to prevent re-downloading the data on every interaction
+@st.cache_data(ttl="5m")
 def load_clinics():
-    """Loads clinic data from the 'Clinics' worksheet in Google Sheets."""
-    conn = st.connection("gcs", type="gsheets") # Back to the original
-    df = conn.read(worksheet="Clinics", usecols=list(range(7)), ttl="10m")
-    # ... rest of the function is the same
+    """Loads clinic data from the 'Clinics' worksheet."""
+    worksheet = connect_to_gsheet()
+    data = worksheet.get_all_records()
+    df = pd.DataFrame(data)
+    
+    # Ensure data types are correct
     df = df.dropna(subset=['clinic_id'])
     df['clinic_id'] = df['clinic_id'].astype(int)
     df['capacity'] = df['capacity'].astype(int)
     df['current_load'] = df['current_load'].astype(int)
     return df
 
-# --- Training and Model Utilities ---
-# The train_sophisticated_model function remains exactly the same.
-# It saves the model locally, which is fine for Streamlit Cloud's ephemeral storage
-# because @st.cache_resource will handle retraining on reboot.
+def persist_clinics(df):
+    """Updates the 'Clinics' worksheet with the provided DataFrame."""
+    worksheet = connect_to_gsheet()
+    set_with_dataframe(worksheet, df)
+    # Clear the cache so the next user sees the updated data
+    load_clinics.clear()
+    st.toast("Clinic loads updated in the cloud.")
+
+# --- Training and Model Utilities (This whole section is unchanged) ---
 @st.cache_resource
 def train_sophisticated_model(retrain=False):
-    # ... (No changes needed inside this entire function) ...
-    # ... (It will save trained_pipeline.joblib to the temporary directory) ...
-    """
-    Train (or load) an advanced pipeline:
-      - Synthetic patient dataset includes location + hospital load
-      - HistGradientBoosting classifier with hyperparameter search
-      - Calibration for reliable probabilities
-      - Returns pipeline and test sets + diagnostics
-    """
     if os.path.exists(MODEL_PATH) and not retrain:
         try:
             data = joblib.load(MODEL_PATH)
@@ -88,8 +95,6 @@ def train_sophisticated_model(retrain=False):
 
     np.random.seed(42)
     num_patients = 4000
-
-    # patient locations are inside the same synthetic city bounding box
     patient_data = {
         'age': np.random.randint(18, 90, size=num_patients),
         'severity': np.random.choice(['low', 'medium', 'high'], size=num_patients, p=[0.55, 0.35, 0.10]),
@@ -102,61 +107,42 @@ def train_sophisticated_model(retrain=False):
         'patient_lon': -74.0 + np.random.rand(num_patients) * 0.1
     }
     patients_df = pd.DataFrame(patient_data)
-
-    # Generate a realistic target using a tunable policy with randomness
     def should_refer(row):
-        # base propensity
         p = 0.3
         if row['severity'] == 'low' and row['vitals_score'] > 6 and row['condition'] in ['flu', 'fracture', 'other']:
             p += 0.45
         if row['severity'] == 'high' or row['vitals_score'] <= 3 or row['condition'] == 'cardiac':
             p -= 0.25
         p += 0.02 * row['comorbidities']
-        # hospital load increases referral probability non-linearly
         if row['hospital_load'] > 70:
             p += 0.25 * ((row['hospital_load'] - 70) / 30)
         p = np.clip(p, 0.02, 0.98)
         return np.random.choice([0, 1], p=[1 - p, p])
 
     patients_df['referred'] = patients_df.apply(should_refer, axis=1)
-
-    # features used by model (exclude lat/lon of clinics)
     feature_cols = ['age', 'vitals_score', 'comorbidities', 'hospital_load', 'patient_lat', 'patient_lon', 'severity', 'condition']
-
     X = patients_df[feature_cols]
     y = patients_df['referred']
     X_train, X_test, y_train, y_test = train_test_split(X, y, stratify=y, test_size=0.25, random_state=42)
-
     numeric_features = ['age', 'vitals_score', 'comorbidities', 'hospital_load', 'patient_lat', 'patient_lon']
     categorical_features = ['severity', 'condition']
-
     numeric_transformer = Pipeline([('scaler', StandardScaler())])
     categorical_transformer = Pipeline([('onehot', OneHotEncoder(handle_unknown='ignore'))])
-
     preprocessor = ColumnTransformer([
         ('num', numeric_transformer, numeric_features),
         ('cat', categorical_transformer, categorical_features)
     ], remainder='drop')
-
-    # Use HistGradientBoostingClassifier for speed and native handling (early stopping)
     clf = HistGradientBoostingClassifier(random_state=42, early_stopping=True)
-
     pipeline = Pipeline([('preprocessor', preprocessor), ('clf', clf)])
-
     param_grid = {
         'clf__max_iter': [100, 200],
         'clf__learning_rate': [0.05, 0.1],
         'clf__max_depth': [3, 5]
     }
-
     grid = GridSearchCV(pipeline, param_grid, cv=3, n_jobs=-1, scoring='roc_auc', verbose=0)
     grid.fit(X_train, y_train)
-
-    # Calibrate probabilities for downstream decision thresholds
     calibrated = CalibratedClassifierCV(grid.best_estimator_, cv=3, method='isotonic')
     calibrated.fit(X_train, y_train)
-
-    # Evaluate
     y_proba = calibrated.predict_proba(X_test)[:, 1]
     y_pred = (y_proba >= 0.5).astype(int)
     accuracy = accuracy_score(y_test, y_pred)
@@ -164,9 +150,7 @@ def train_sophisticated_model(retrain=False):
     brier = brier_score_loss(y_test, y_proba)
     class_report_df = pd.DataFrame(classification_report(y_test, y_pred, output_dict=True)).transpose()
     cm = confusion_matrix(y_test, y_pred)
-
     perm_res = permutation_importance(calibrated, X_test, y_test, n_repeats=12, random_state=42, n_jobs=-1)
-    # build feature names list from preprocessor
     cat_names = calibrated.base_estimator_.named_steps['preprocessor'].named_transformers_['cat'].named_steps['onehot'].get_feature_names_out(categorical_features)
     feat_names = numeric_features + list(cat_names)
     importances_df = pd.DataFrame({
@@ -174,56 +158,34 @@ def train_sophisticated_model(retrain=False):
         'importance_mean': perm_res.importances_mean,
         'importance_std': perm_res.importances_std
     }).sort_values('importance_mean', ascending=False)
-
-    # Save model and artifacts
     model_artifact = {
-        'pipeline': calibrated,
-        'feature_cols': feature_cols,
-        'X_test': X_test,
-        'y_test': y_test,
-        'accuracy': accuracy,
-        'auc': auc,
-        'brier': brier,
-        'class_report_df': class_report_df,
-        'cm': cm,
-        'importances_df': importances_df
+        'pipeline': calibrated, 'feature_cols': feature_cols, 'X_test': X_test,
+        'y_test': y_test, 'accuracy': accuracy, 'auc': auc, 'brier': brier,
+        'class_report_df': class_report_df, 'cm': cm, 'importances_df': importances_df
     }
     joblib.dump(model_artifact, MODEL_PATH)
-
     return model_artifact
 
-# ... (The rest of the file, including initialize_session_state, find_best_clinic,
-#      simulate_policy, and the entire UI section, remains exactly the same.)
-# --- Session State and Persistent Clinics ---
+# --- The rest of the code is unchanged ---
 def initialize_session_state():
     if 'clinics_df' not in st.session_state:
         st.session_state.clinics_df = load_clinics()
     if 'model' not in st.session_state:
         st.session_state.model_artifact = train_sophisticated_model()
         st.session_state.model = st.session_state.model_artifact['pipeline']
-
 initialize_session_state()
-
-# --- Clinic matching (improved score-based routing) ---
 def score_clinics_for_patient(patient_row, clinics_df, specialty_map, weights):
-    """
-    Score clinics by (availability, distance, specialty_match).
-    weights: dict with keys 'availability', 'distance', 'specialty'
-    """
     scores = []
     for _, c in clinics_df.iterrows():
         availability = float(c['capacity'] - c['current_load'])
         distance = haversine_km(patient_row['patient_lat'], patient_row['patient_lon'], c['lat'], c['lon'])
         specialty_match = 1.0 if specialty_map.get(patient_row['condition'], 'general') == c['specialty'] else 0.0
-        # normalize approximate ranges: availability (~0-20), distance (~0-20 km)
         score = weights['availability'] * (availability / 20.0) - weights['distance'] * (distance / 30.0) + weights['specialty'] * specialty_match
-        # enforce only clinics with free capacity
         if availability <= 0:
             score -= 2.0
         scores.append((score, int(c['clinic_id'])))
     scores.sort(reverse=True)
     return scores
-
 def find_best_clinic(patient_row, clinics_df, weights=None):
     if weights is None:
         weights = {'availability': 1.2, 'distance': 0.8, 'specialty': 1.0}
@@ -235,8 +197,6 @@ def find_best_clinic(patient_row, clinics_df, weights=None):
     if best_score < -1.0:
         return None
     return best_id
-
-# --- Simulation utility ---
 def simulate_policy(pipeline, X_sim, y_sim, clinics_start_df, threshold=0.5, weights=None):
     clinics_df = clinics_start_df.copy().reset_index(drop=True)
     results = []
@@ -253,26 +213,20 @@ def simulate_policy(pipeline, X_sim, y_sim, clinics_start_df, threshold=0.5, wei
                 clinics_df.at[cidx, 'current_load'] += 1
         results.append({'index': idx, 'true': int(y_sim.loc[idx]), 'pred': refer, 'proba': float(proba), 'clinic_id': chosen_clinic})
     res_df = pd.DataFrame(results)
-    metrics = {}
-    metrics['accuracy'] = accuracy_score(res_df['true'], res_df['pred'])
-    metrics['precision'], metrics['recall'], metrics['f1'], _ = precision_recall_fscore_support(res_df['true'], res_df['pred'], average='binary', zero_division=0)
-    metrics['referrals_made'] = res_df['pred'].sum()
-    metrics['successful_referrals'] = res_df['clinic_id'].notnull().sum()
+    metrics = {'accuracy': accuracy_score(res_df['true'], res_df['pred']),
+               'precision': precision_recall_fscore_support(res_df['true'], res_df['pred'], average='binary', zero_division=0)[0],
+               'recall': precision_recall_fscore_support(res_df['true'], res_df['pred'], average='binary', zero_division=0)[1],
+               'f1': precision_recall_fscore_support(res_df['true'], res_df['pred'], average='binary', zero_division=0)[2],
+               'referrals_made': res_df['pred'].sum(),
+               'successful_referrals': res_df['clinic_id'].notnull().sum()}
     return metrics, res_df, clinics_df
-
-# --- Main UI ---
 st.title("🏥 Advanced Patient Referral System — Sophisticated Policy Mode")
-
 col1, col2 = st.columns((2, 1))
-
 with col2:
     st.sidebar.header("Model & Policy Controls")
-    retrain = st.sidebar.button("Retrain model")
-    if retrain:
-        st.session_state.model_artifact = train_sophisticated_model(retrain=True)
-        st.session_state.model = st.session_state.model_artifact['pipeline']
+    if st.sidebar.button("Retrain model"):
+        train_sophisticated_model(retrain=True)
         st.success("Model retrained.")
-
     threshold = st.sidebar.slider("Referral probability threshold", 0.0, 1.0, 0.5, 0.01)
     st.sidebar.markdown("Adjust the decision threshold used to decide referrals.")
     st.sidebar.markdown("Routing weights (higher availability favours capacity; distance penalizes farther clinics).")
@@ -280,10 +234,8 @@ with col2:
     dist_w = st.sidebar.slider("Distance weight", 0.0, 3.0, 0.8, 0.1)
     spec_w = st.sidebar.slider("Specialty match weight", 0.0, 3.0, 1.0, 0.1)
     routing_weights = {'availability': avail_w, 'distance': dist_w, 'specialty': spec_w}
-
 with col1:
     st.subheader("Patient Intake (live)")
-
     with st.form("patient_live_form"):
         p_age = st.slider("Age", 1, 100, 50)
         p_vitals = st.slider("Vitals (1=critical,10=stable)", 1, 10, 7)
@@ -293,42 +245,29 @@ with col1:
         p_hosp_load = st.slider("Hospital load (%)", 0, 100, 60)
         p_lat = st.number_input("Patient latitude", 40.02, 40.12, 40.05, format="%.5f")
         p_lon = st.number_input("Patient longitude", -73.98, -74.12, -74.02, format="%.5f")
-        submit = st.form_submit_button("Assess and Route")
-
-    if submit:
-        input_df = pd.DataFrame([{
-            'age': p_age,
-            'vitals_score': p_vitals,
-            'comorbidities': p_comorbid,
-            'hospital_load': p_hosp_load,
-            'patient_lat': p_lat,
-            'patient_lon': p_lon,
-            'severity': p_severity,
-            'condition': p_condition
-        }])
-        proba = st.session_state.model.predict_proba(input_df)[0,1]
-        recommend = proba >= threshold
-
-        st.markdown(f"Predicted referral probability: **{proba:.2%}**")
-        if recommend:
-            st.warning("Model recommends referral.")
-            clinic_id = find_best_clinic(input_df.iloc[0], st.session_state.clinics_df, weights=routing_weights)
-            if clinic_id is not None:
-                cinfo = st.session_state.clinics_df[st.session_state.clinics_df['clinic_id'] == clinic_id].iloc[0]
-                st.success(f"Refer to {cinfo['clinic_name']} (specialty: {cinfo['specialty']}, distance ~ {haversine_km(p_lat,p_lon,cinfo['lat'],cinfo['lon']):.1f} km, availability {int(cinfo['capacity']-cinfo['current_load'])})")
-                # commit referral
-                idx = st.session_state.clinics_df[st.session_state.clinics_df['clinic_id'] == clinic_id].index[0]
-                st.session_state.clinics_df.at[idx, 'current_load'] += 1
-                persist_clinics(st.session_state.clinics_df)
+        if st.form_submit_button("Assess and Route"):
+            input_df = pd.DataFrame([{'age': p_age, 'vitals_score': p_vitals, 'comorbidities': p_comorbid,
+                                      'hospital_load': p_hosp_load, 'patient_lat': p_lat, 'patient_lon': p_lon,
+                                      'severity': p_severity, 'condition': p_condition}])
+            proba = st.session_state.model.predict_proba(input_df)[0,1]
+            recommend = proba >= threshold
+            st.markdown(f"Predicted referral probability: **{proba:.2%}**")
+            if recommend:
+                st.warning("Model recommends referral.")
+                clinic_id = find_best_clinic(input_df.iloc[0], st.session_state.clinics_df, weights=routing_weights)
+                if clinic_id is not None:
+                    cinfo = st.session_state.clinics_df[st.session_state.clinics_df['clinic_id'] == clinic_id].iloc[0]
+                    st.success(f"Refer to {cinfo['clinic_name']} (specialty: {cinfo['specialty']}, distance ~ {haversine_km(p_lat,p_lon,cinfo['lat'],cinfo['lon']):.1f} km, availability {int(cinfo['capacity']-cinfo['current_load'])})")
+                    idx = st.session_state.clinics_df[st.session_state.clinics_df['clinic_id'] == clinic_id].index[0]
+                    st.session_state.clinics_df.at[idx, 'current_load'] += 1
+                    persist_clinics(st.session_state.clinics_df)
+                else:
+                    st.error("No suitable clinic available. Consider on-site treatment or temporary overflow solutions.")
             else:
-                st.error("No suitable clinic available. Consider on-site treatment or temporary overflow solutions.")
-        else:
-            st.info("Model does not recommend referral.")
-            # policy override if hospital severely overloaded
-            if p_hosp_load >= 92:
-                st.warning("Hospital is critically overloaded — consider referral despite model output.")
-            st.write("Action: treat at hospital / monitor.")
-
+                st.info("Model does not recommend referral.")
+                if p_hosp_load >= 92:
+                    st.warning("Hospital is critically overloaded — consider referral despite model output.")
+                st.write("Action: treat at hospital / monitor.")
 with st.sidebar:
     st.header("Model diagnostics")
     ma = st.session_state.model_artifact
@@ -336,51 +275,37 @@ with st.sidebar:
     st.metric("Brier score", f"{ma['brier']:.3f}")
     st.subheader("Classification report (threshold 0.5)")
     st.dataframe(ma['class_report_df'].style.format("{:.2f}"))
-
     st.subheader("Permutation importance (top features)")
     top_imp = ma['importances_df'].head(8).set_index('feature')
     st.bar_chart(top_imp['importance_mean'])
-
 st.markdown("---")
 st.subheader("Live Clinics")
 st.dataframe(st.session_state.clinics_df, use_container_width=True)
 st.caption("Clinic load persists to a cloud Google Sheet.")
-
-# --- Simulation / Policy evaluation UI ---
 st.markdown("---")
 st.subheader("Policy Simulation / Stress Test")
 sim_col1, sim_col2 = st.columns((1, 2))
-
 with sim_col1:
-    n_sim = st.number_input("Number of test rows to simulate (from built test set)", min_value=50, max_value=2000, value=500, step=50)
+    n_sim = st.number_input("Number of test rows to simulate (from built test set)", 50, 2000, 500, 50)
     if st.button("Run simulation with current threshold & routing weights"):
         ma = st.session_state.model_artifact
         X_test = ma['X_test'].reset_index(drop=True)
         y_test = ma['y_test'].reset_index(drop=True)
-        X_sub = X_test.head(n_sim)
-        y_sub = y_test.head(n_sim)
-        metrics, res_df, clinics_after = simulate_policy(st.session_state.model, X_sub, y_sub, st.session_state.clinics_df, threshold=threshold, weights=routing_weights)
+        X_sub, y_sub = X_test.head(n_sim), y_test.head(n_sim)
+        metrics, res_df, clinics_after = simulate_policy(st.session_state.model, X_sub, y_sub, st.session_state.clinics_df, threshold, routing_weights)
         st.write("Simulation metrics:", metrics)
         st.dataframe(res_df.head(200))
-        # do not overwrite persistent loads during sim; show result snapshot
         st.dataframe(clinics_after)
-        st.info("Simulation used a snapshot of current clinic loads; persistent loads were not changed by the simulation.")
-
+        st.info("Simulation used a snapshot of current clinic loads; persistent loads were not changed.")
 with sim_col2:
     st.subheader("Operational recommendations")
-    st.markdown("""
-    - Use the threshold slider to tune sensitivity (lower threshold => more referrals).
-    - Increase availability weight to prefer clinics with spare capacity.
-    - Increase specialty weight to enforce specialty matching.
-    - Use the simulation to measure trade-offs (referrals vs successful routing).
-    """)
-
-# --- Footer / Export model & clinics ---
+    st.markdown("- Use the threshold slider to tune sensitivity (lower threshold => more referrals).\n"
+                "- Increase availability weight to prefer clinics with spare capacity.\n"
+                "- Increase specialty weight to enforce specialty matching.\n"
+                "- Use the simulation to measure trade-offs (referrals vs successful routing).")
 st.markdown("---")
 if st.button("Export model & clinics snapshot"):
     export_time = datetime.datetime.utcnow().strftime("%Y%m%d%H%M%S")
-    joblib.dump({
-        'model_artifact': st.session_state.model_artifact,
-        'clinics_snapshot': st.session_state.clinics_df
-    }, f"export_snapshot_{export_time}.joblib")
+    joblib.dump({'model_artifact': st.session_state.model_artifact, 'clinics_snapshot': st.session_state.clinics_df},
+                f"export_snapshot_{export_time}.joblib")
     st.success("Export saved.")
