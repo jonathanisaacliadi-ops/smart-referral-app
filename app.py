@@ -151,7 +151,7 @@ def train_sophisticated_model(retrain=False):
     class_report_df = pd.DataFrame(classification_report(y_test, y_pred, output_dict=True)).transpose()
     cm = confusion_matrix(y_test, y_pred)
     perm_res = permutation_importance(calibrated, X_test, y_test, n_repeats=12, random_state=42, n_jobs=-1)
-    cat_names = calibrated.estimator_.named_steps['preprocessor'].named_transformers_['cat'].named_steps['onehot'].get_feature_names_out(categorical_features)
+    cat_names = calibrated.calibrated_classifiers_[0].named_steps['preprocessor'].named_transformers_['cat'].named_steps['onehot'].get_feature_names_out(categorical_features)
     feat_names = numeric_features + list(cat_names)
     importances_df = pd.DataFrame({
         'feature': feat_names,
