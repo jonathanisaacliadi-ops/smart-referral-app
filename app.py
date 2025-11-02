@@ -166,7 +166,6 @@ def train_sophisticated_model(retrain=False):
     
     perm_res = permutation_importance(calibrated, X_test, y_test, n_repeats=12, random_state=42, n_jobs=-1)
     
-    # FINAL FIX for ValueError: This guarantees the lengths match.
     feat_names = X_test.columns
     importances_df = pd.DataFrame({
         'feature': feat_names,
@@ -275,7 +274,7 @@ with col1:
         p_condition = st.selectbox("Condition", options=['flu', 'fracture', 'cardiac', 'respiratory', 'other'])
         p_hosp_load = st.slider("Hospital load (%)", 0, 100, 60)
         p_lat = st.number_input("Patient latitude", 40.02, 40.12, 40.05, format="%.5f")
-        p_lon = st.number_input("Patient longitude", -74.12, -73.98, -74.02, format="%.5f") # Corrected min/max
+        p_lon = st.number_input("Patient longitude", -74.12, -73.98, -74.02, format="%.5f")
         
         if st.form_submit_button("Assess and Route"):
             input_df = pd.DataFrame([{'age': p_age, 'vitals_score': p_vitals, 'comorbidities': p_comorbid,
