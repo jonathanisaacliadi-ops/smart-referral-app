@@ -7,7 +7,6 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
-from st_gsheets_connection import GSheetsConnection
 
 # ... (all sklearn imports remain the same) ...
 from sklearn.model_selection import train_test_split, GridSearchCV
@@ -50,16 +49,15 @@ def haversine_km(lat1, lon1, lat2, lon2):
 
 def persist_clinics(df):
     """Updates the 'Clinics' worksheet in Google Sheets with the provided DataFrame."""
-    # Use the same direct class connection method here to bypass the bug
-    conn = st.experimental_connection("gcs", type=GSheetsConnection)
+    conn = st.connection("gcs", type="gsheets") # Back to the original
     conn.update(worksheet="Clinics", data=df)
     st.toast("Clinic loads updated in the cloud.")
 
 def load_clinics():
     """Loads clinic data from the 'Clinics' worksheet in Google Sheets."""
-    conn = st.experimental_connection("gcs", type=GSheetsConnection)
-    df = conn.read(worksheet="Clinics", usecols=list(range(7)), ttl="10m") # Cache for 10 mins
-    # Ensure data types are correct
+    conn = st.connection("gcs", type="gsheets") # Back to the original
+    df = conn.read(worksheet="Clinics", usecols=list(range(7)), ttl="10m")
+    # ... rest of the function is the same
     df = df.dropna(subset=['clinic_id'])
     df['clinic_id'] = df['clinic_id'].astype(int)
     df['capacity'] = df['capacity'].astype(int)
