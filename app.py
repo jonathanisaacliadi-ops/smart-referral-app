@@ -297,12 +297,56 @@ with sim_col1:
         ma = st.session_state.model_artifact
         X_test = ma['X_test'].reset_index(drop=True)
         y_test = ma['y_test'].reset_index(drop=True)
-        X_sub, y_sub = X_test.head(n_sim), y_test.head(n_sim)
-        metrics, res_df, clinics_after = simulate_policy(st.session_state.model, X_sub, y_sub, st.session_state.clinics_df, threshold, routing_weights)
-        st.write("Simulation metrics:", metrics)
-        st.dataframe(res_df.head(200))
-        st.dataframe(clinics_after)
-        st.info("Simulation used a snapshot of current clinic loads; persistent loads were not changed.")
+        X_sub = X_test.head(n_sim)
+        y_sub = y_test.head(n_sim)
+        
+        # --- Simulation logic is the same ---
+        metrics, res_df, clinics_after = simulate_policy(
+            st.session_state.model, X_sub, y_sub, 
+            st.session_state.clinics_df, threshold=threshold, weights=routing_weights
+        )
+        
+        # --- NEW: User-friendly display ---
+        st.subheader("Simulation Results")
+
+        # Create columns for key metrics
+        col1, col2, col3 = st.columns(3)
+        
+        referrals_made = int(metrics['referrals_made'])
+        successful_referrals = int(metrics['successful_referrals'])
+        
+        with col1:
+            st.metric(label="Referrals Recommended", value=referrals_made)
+        
+        with col2:
+            st.metric(label="Successful Referrals", value=successful_referrals)
+        
+        with col3:
+            # Calculate success rate, handling division by zero
+            if referrals_made > 0:
+                success_rate = (successful_referrals / referrals_made) * 100
+                st.metric(label="Routing Success Rate", value=f"{success_rate:.1f}%")
+            else:
+                st.metric(label="Routing Success Rate", value="N/A")
+
+        # Add a human-readable summary sentence
+        st.markdown(f"The simulation recommended **{referrals_made}** referrals, and successfully found a clinic for **{successful_referrals}** of them. This policy captured **{metrics['recall']:.0%}** of all patients who could have been referred.")
+        
+        # Put the detailed stats in an expander to keep the UI clean
+        with st.expander("Show detailed results and metrics"):
+            st.markdown("##### Detailed Classification Metrics")
+            m_col1, m_col2, m_col3, m_col4 = st.columns(4)
+            m_col1.metric("Accuracy", f"{metrics['accuracy']:.2f}")
+            m_col2.metric("Precision", f"{metrics['precision']:.2f}")
+            m_col3.metric("Recall", f"{metrics['recall']:.2f}")
+            m_col4.metric("F1-Score", f"{metrics['f1']:.2f}")
+            
+            st.markdown("##### Simulation Log (first 200 patients)")
+            st.dataframe(res_df.head(200))
+            
+            st.markdown("##### Final Clinic Status (Snapshot)")
+            st.dataframe(clinics_after)
+        st.info("Simulation used a snapshot of current clinic loads; persistent loads were not changed by the simulation.")
 with sim_col2:
     st.subheader("Operational recommendations")
     st.markdown("- Use the threshold slider to tune sensitivity (lower threshold => more referrals).\n"
