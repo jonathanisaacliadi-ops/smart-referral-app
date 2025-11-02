@@ -138,20 +138,14 @@ def train_sophisticated_model(retrain=False):
     }
     grid = GridSearchCV(pipeline, param_grid, cv=3, n_jobs=-1, scoring='roc_auc', verbose=0)
     grid.fit(X_train, y_train)
-
-    # --- THIS IS THE CRITICAL CHANGE ---
-    # Get the best pipeline that GridSearchCV found. It is already fitted.
     best_pipeline = grid.best_estimator_
 
-    # Get the feature names from this fitted pipeline BEFORE calibration.
-    cat_names = best_pipeline.named_steps['preprocessor'].named_transformers_['cat'].named_steps['onehot'].get_feature_names_out(categorical_features)
-    # --- END OF CRITICAL CHANGE ---
+    # THIS LINE IS NO LONGER NEEDED HERE BECAUSE OF THE FIX BELOW
+    # cat_names = best_pipeline.named_steps['preprocessor'].named_transformers_['cat'].named_steps['onehot'].get_feature_names_out(categorical_features)
 
-    # Now, create and fit the calibrated classifier using the best pipeline
     calibrated = CalibratedClassifierCV(best_pipeline, cv=3, method='isotonic')
     calibrated.fit(X_train, y_train)
 
-    # Evaluate using the calibrated model
     y_proba = calibrated.predict_proba(X_test)[:, 1]
     y_pred = (y_proba >= 0.5).astype(int)
     accuracy = accuracy_score(y_test, y_pred)
@@ -160,11 +154,10 @@ def train_sophisticated_model(retrain=False):
     class_report_df = pd.DataFrame(classification_report(y_test, y_pred, output_dict=True)).transpose()
     cm = confusion_matrix(y_test, y_pred)
 
-    # Calculate permutation importance on the FINAL calibrated model
     perm_res = permutation_importance(calibrated, X_test, y_test, n_repeats=12, random_state=42, n_jobs=-1)
     
-    # Construct the final list of feature names (we already got cat_names earlier)
-    feat_names = numeric_features + list(cat_names)
+    # FINAL FIX IS HERE: This guarantees the lengths match.
+    feat_names = X_test.columns
     importances_df = pd.DataFrame({
         'feature': feat_names,
         'importance_mean': perm_res.importances_mean,
