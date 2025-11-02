@@ -237,7 +237,7 @@ def simulate_policy(pipeline, X_sim, y_sim, clinics_start_df, threshold=0.5, wei
 # --- Main App ---
 initialize_session_state()
 
-st.title("🏥 Advanced Patient Referral System — Sophisticated Policy Mode")
+st.title("🏥 Advanced Patient Referral System")
 col1, col2 = st.columns((2, 1))
 
 # Sidebar controls
@@ -246,12 +246,12 @@ with st.sidebar:
     if st.button("Retrain model"):
         train_sophisticated_model(retrain=True)
         st.rerun()
-    threshold = st.slider("Referral probability threshold", 0.0, 1.0, 0.5, 0.01)
+    threshold = st.slider("Referral probability threshold", 0.0, 1.0, 0.25, 0.01)
     st.markdown("---")
     st.markdown("##### Routing Weights")
-    avail_w = st.slider("Availability weight", 0.0, 3.0, 1.2, 0.1)
-    dist_w = st.slider("Distance weight", 0.0, 3.0, 0.8, 0.1)
-    spec_w = st.slider("Specialty match weight", 0.0, 3.0, 1.0, 0.1)
+    avail_w = st.slider("Availability weight", 0.0, 3.0, 1.0, 0.1)
+    dist_w = st.slider("Distance weight", 0.0, 3.0, 0.6, 0.1)
+    spec_w = st.slider("Specialty match weight", 0.0, 3.0, 0.9, 0.1)
     routing_weights = {'availability': avail_w, 'distance': dist_w, 'specialty': spec_w}
     st.markdown("---")
     st.header("Model Diagnostics")
@@ -267,8 +267,8 @@ with st.sidebar:
 with col1:
     st.subheader("Patient Intake (Live)")
     with st.form("patient_live_form"):
-        p_age = st.slider("Age", 1, 100, 50)
-        p_vitals = st.slider("Vitals (1=critical, 10=stable)", 1, 10, 7)
+        p_age = st.slider("Age", 1, 100, 18)
+        p_vitals = st.slider("Vitals (1 = critical, 10 = stable)", 1, 10, 7)
         p_comorbid = st.number_input("Comorbidities", 0, 10, 1)
         p_severity = st.selectbox("Severity", options=['low', 'medium', 'high'])
         p_condition = st.selectbox("Condition", options=['flu', 'fracture', 'cardiac', 'respiratory', 'other'])
